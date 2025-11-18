@@ -97,17 +97,39 @@ def simulate_rover(env: Environment, start: Tuple[int, int], goal: Tuple[int, in
         elif action == 'recharge_override':
             # Need to go to recharge station
             if verbose:
-                print(f"\n  🔋 Battery critical! Navigating to recharge station at {override_target}")
+                battery_pct = rover.get_battery_percentage()
+                print(f"\n  🔋 Battery {'critical' if battery_pct < 20 else 'low'}! Navigating to recharge station at {override_target}")
             
             # Plan path to recharge station
             recharge_path = planner.plan_path(rover.position, override_target, heuristic_name)
             if recharge_path:
-                # Execute path to recharge station
+                # Execute path to recharge station step-by-step
+                recharge_failed = False
                 for i in range(1, len(recharge_path)):
-                    if not rover.move_to(recharge_path[i], env):
+                    move_success = rover.move_to(recharge_path[i], env)
+                    
+                    if not move_success:
                         if verbose:
-                            print("  ❌ Failed to reach recharge station!")
+                            print("  ❌ Failed to reach recharge station - battery depleted!")
+                        recharge_failed = True
                         break
+                    
+                    if verbose:
+                        battery_pct = rover.get_battery_percentage()
+                        print(f"     → Moving to recharge station: {rover.position}, Battery: {battery_pct:.1f}%")
+                    
+                    # Check for hazards even on recharge path
+                    if env.is_hazardous(rover.position[0], rover.position[1]):
+                        if verbose:
+                            print("  ⚠️ Hazard encountered on recharge path! Backtracking...")
+                        rover.backtrack()
+                        recharge_failed = True
+                        break
+                
+                if recharge_failed:
+                    if verbose:
+                        print("  ❌ Could not reach recharge station!")
+                    break
                 
                 # After recharging, replan to goal
                 if verbose:

@@ -45,13 +45,17 @@ class MarsRoverGUI:
         self.goal_pos = (18, 18)
         self.is_simulating = False
         self.animation_delay = 500  # Milliseconds between steps (500ms = 0.5 seconds)
-        self.max_steps_estimate = 30  # Fixed x-axis limit for stable battery graph
+        self.max_steps_estimate = 50  # Fixed x-axis limit for stable battery graph
         
         # Solar Power Management toggle
         self.solar_power_enabled = tk.BooleanVar(value=True)  # Enabled by default
         
         # GIF Recorder
         self.gif_recorder = GIFRecorder()
+        
+        # Terrain editing mode
+        self.edit_mode_enabled = tk.BooleanVar(value=False)
+        self.selected_terrain = tk.StringVar(value="FLAT")
         
         # Terrain colors
         self.terrain_colors = {
@@ -125,6 +129,38 @@ class MarsRoverGUI:
         
         ttk.Button(env_frame, text="Generate Environment", 
                   command=self.generate_environment).grid(row=2, column=0, columnspan=2, pady=10)
+        
+        # === Terrain Editor ===
+        editor_frame = ttk.LabelFrame(scrollable_frame, text="🖌️ Terrain Editor", padding=10)
+        editor_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        # Enable/Disable editing mode
+        edit_checkbox = ttk.Checkbutton(editor_frame, text="Enable Editing Mode (Click on map to paint)",
+                                        variable=self.edit_mode_enabled,
+                                        command=self.toggle_edit_mode)
+        edit_checkbox.pack(anchor=tk.W, pady=5)
+        
+        # Terrain type selector
+        ttk.Label(editor_frame, text="Paint Terrain:").pack(anchor=tk.W, pady=(5,2))
+        
+        terrain_options = [
+            ("FLAT", "Flat (5)"),
+            ("SANDY", "Sandy (10)"),
+            ("SAND_TRAP", "Sand Trap (17)"),
+            ("RADIATION_SPOT", "Radiation (15)"),
+            ("CLIFF", "Cliff (20)"),
+            ("ROCKY", "Rocky (∞)"),
+            ("RECHARGE_STATION", "Recharge (0)")
+        ]
+        
+        for terrain_key, terrain_label in terrain_options:
+            rb = ttk.Radiobutton(editor_frame, text=terrain_label, 
+                                variable=self.selected_terrain, value=terrain_key)
+            rb.pack(anchor=tk.W, padx=20)
+        
+        # Clear/Reset button
+        ttk.Button(editor_frame, text="🗑️ Clear All to Flat", 
+                  command=self.clear_to_flat).pack(fill=tk.X, pady=10)
         
         # === Position Settings ===
         pos_frame = ttk.LabelFrame(scrollable_frame, text="Start & Goal Positions", padding=10)
@@ -252,6 +288,9 @@ class MarsRoverGUI:
         # Canvas for matplotlib
         self.canvas = FigureCanvasTkAgg(self.fig, parent)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        # Connect mouse click event for terrain editing
+        self.canvas.mpl_connect('button_press_event', self.on_map_click)
         
         # Status bar
         self.status_var = tk.StringVar(value="Ready")
@@ -488,6 +527,81 @@ class MarsRoverGUI:
         
         print(f"🌪️ Added {num_storms} dust storm(s) to environment")
     
+    def toggle_edit_mode(self):
+        """Toggle terrain editing mode."""
+        if self.edit_mode_enabled.get():
+            self.status_var.set("🖌️ Editing Mode: Click on map to paint terrain")
+            messagebox.showinfo("Terrain Editor", 
+                              "Editing Mode Enabled!\n\n"
+                              "• Click on any cell to change its terrain\n"
+                              "• Select terrain type from the editor panel\n"
+                              "• Changes are applied instantly\n"
+                              "• Click 'Clear All to Flat' to reset")
+        else:
+            self.status_var.set("Ready")
+    
+    def on_map_click(self, event):
+        """Handle mouse clicks on the map for terrain editing."""
+        # Only process clicks if in edit mode and not simulating
+        if not self.edit_mode_enabled.get() or self.is_simulating:
+            return
+        
+        # Only process clicks on the left panel (map)
+        if event.inaxes != self.ax_map:
+            return
+        
+        if self.env is None:
+            return
+        
+        # Get click coordinates
+        x, y = int(round(event.xdata)), int(round(event.ydata))
+        
+        # Validate coordinates
+        if not (0 <= x < self.env.width and 0 <= y < self.env.height):
+            return
+        
+        # Get selected terrain type
+        terrain_name = self.selected_terrain.get()
+        terrain_type = getattr(TerrainType, terrain_name)
+        
+        # Update terrain
+        old_terrain = self.env.get_terrain(x, y)
+        self.env.set_terrain(x, y, terrain_type)
+        
+        # Update visualization
+        self.visualize_environment()
+        
+        # Update status
+        self.status_var.set(f"🖌️ Changed ({x}, {y}) from {old_terrain.name} to {terrain_type.name}")
+    
+    def clear_to_flat(self):
+        """Clear entire environment to flat terrain."""
+        if self.env is None:
+            messagebox.showwarning("Warning", "No environment to clear!")
+            return
+        
+        result = messagebox.askyesno("Confirm Clear", 
+                                     "Clear all terrain to FLAT?\n\n"
+                                     "This will reset the entire map.")
+        if not result:
+            return
+        
+        # Clear all to flat
+        for x in range(self.env.width):
+            for y in range(self.env.height):
+                self.env.set_terrain(x, y, TerrainType.FLAT)
+        
+        # Keep start and goal as flat
+        start_x, start_y = self.start_x_var.get(), self.start_y_var.get()
+        goal_x, goal_y = self.goal_x_var.get(), self.goal_y_var.get()
+        self.env.set_terrain(start_x, start_y, TerrainType.FLAT)
+        self.env.set_terrain(goal_x, goal_y, TerrainType.FLAT)
+        
+        # Update visualization
+        self.visualize_environment()
+        
+        self.status_var.set("✅ Environment cleared to flat terrain")
+    
     def visualize_environment(self, path=None, battery_history=None):
         """Visualize the current environment with dual-panel layout (same as GIF animations)."""
         # Clear both panels
@@ -681,10 +795,14 @@ class MarsRoverGUI:
         
         # Title with large day/night indicator (only if solar enabled)
         heuristic_name = self.heuristic_var.get().replace("_", " ").title()
+        
+        # Add edit mode indicator
+        edit_mode_text = "🖌️ EDIT MODE - " if self.edit_mode_enabled.get() else ""
+        
         if solar_enabled and time_indicator:
-            title_text = f'{time_indicator}\nRover Navigation - {heuristic_name}'
+            title_text = f'{edit_mode_text}{time_indicator}\nRover Navigation - {heuristic_name}'
         else:
-            title_text = f'Rover Navigation - {heuristic_name}'
+            title_text = f'{edit_mode_text}Rover Navigation - {heuristic_name}'
         title_color = 'black' if is_daytime else 'white'
         self.ax_map.set_title(title_text, fontsize=14, fontweight='bold', color=title_color, pad=15)
         
@@ -964,7 +1082,7 @@ class MarsRoverGUI:
                     
                     recharge_path = planner.plan_path(rover.position, override_target, heuristic)
                     if recharge_path:
-                        # Execute path to recharge station - CHECK FOR BATTERY DEPLETION
+                        # Execute path to recharge station step-by-step - CHECK FOR BATTERY DEPLETION
                         recharge_failed = False
                         for i in range(1, len(recharge_path)):
                             move_success = rover.move_to(recharge_path[i], self.env)
@@ -973,6 +1091,40 @@ class MarsRoverGUI:
                                 # BATTERY DEPLETED - Rover is STRANDED
                                 recharge_failed = True
                                 break
+                            
+                            # Check for hazard even on recharge path
+                            if self.env.is_hazardous(rover.position[0], rover.position[1]):
+                                rover.backtrack()
+                                recharge_failed = True
+                                break
+                            
+                            # Update visualization during recharge journey
+                            self.root.after(0, lambda p=rover.path_history.copy(), b=rover.battery_history.copy(): 
+                                          self.visualize_environment(p, b))
+                            
+                            import time
+                            time.sleep(self.animation_delay / 1000.0)
+                        
+                        if recharge_failed:
+                            # Could not reach recharge station - mission fails
+                            break
+                        
+                        # Successfully reached recharge station
+                        if rover.position == override_target:
+                            # Add recharge event
+                            events.append({
+                                'step': len(rover.path_history) - 1,
+                                'type': 'recharge',
+                                'position': rover.position
+                            })
+                        
+                        planned_path = planner.plan_path(rover.position, self.goal_pos, heuristic)
+                        if not planned_path:
+                            break
+                        current_idx = 1
+                    else:
+                        # Cannot find path to recharge station
+                        break
                 
                 elif action == 'storm_shelter':
                     # Seek shelter from dust storm
